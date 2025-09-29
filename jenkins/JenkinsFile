@@ -1,0 +1,93 @@
+pipeline {
+    agent any
+
+    // UI parameters
+    parameters {
+        choice(
+            name: 'ENV',
+            choices: ['dev', 'qa', 'prod'],
+            description: 'Select the environment to deploy'
+        )
+        booleanParam(
+            name: 'AUTO_APPLY',
+            defaultValue: false,
+            description: 'If true, skip manual approval and auto apply'
+        )
+    }
+
+    environment {
+        TF_ROOT = "env/${params.ENV}"
+        TF_BACKEND_BUCKET = "mycompany-terraform-state"
+        TF_REGION = "us-east-1"
+        TF_STATE_KEY = "vpc/${params.ENV}/terraform.tfstate"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY',
+                    credentialsId: 'jenkins-aws-creds'
+                ]]) {
+                    sh "./scripts/tf_init.sh ${TF_ROOT}"
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY',
+                    credentialsId: 'jenkins-aws-creds'
+                ]]) {
+                    sh "./scripts/tf_plan.sh ${TF_ROOT}"
+                    archiveArtifacts artifacts: "${TF_ROOT}/tfplan.json", fingerprint: true
+                }
+            }
+        }
+
+        stage('Manual Approval') {
+            when {
+                expression { return !params.AUTO_APPLY }
+            }
+            steps {
+                timeout(time: 1, unit: 'HOURS') {
+                    input message: "Approve Terraform apply for ${params.ENV} environment?"
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY',
+                    credentialsId: 'jenkins-aws-creds'
+                ]]) {
+                    sh "./scripts/tf_apply.sh ${TF_ROOT}"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Terraform deployment completed for ${params.ENV}"
+        }
+        failure {
+            echo "Terraform deployment failed for ${params.ENV}"
+        }
+    }
+}
